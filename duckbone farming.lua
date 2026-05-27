@@ -1,100 +1,84 @@
 -- ============================================================
 -- [GIL_MISTWAKE] Mistwake Dungeon Gil Farming Loop
--- Version: 1.0.0
+-- Version: 1.1.0
 -- Requires: SomethingNeedDoing (Jaksuhn fork), AutoDuty,
 --           vnavmesh, YesAlready, TextAdvance, Lifestream
 -- ============================================================
 -- LOOP OVERVIEW:
 --   1. Run Mistwake via AutoDuty for X runs (configurable)
 --   2. Teleport to your Grand Company city
---   3. Navigate to Personnel Officer → Expert Delivery
---   4. Turn in ALL armor/gear loot until seals are capped
---   5. Navigate to GC Merchant → buy Duckbones until out of seals
+--   3. Navigate to Personnel Officer -> Expert Delivery
+--   4. Turn in loot filtered by blacklist/whitelist
+--   5. Navigate to GC Merchant -> buy Duckbones until out of seals
 --   6. Repeat from step 1 indefinitely until script is stopped
 -- ============================================================
 
 -- ============================================================
--- ██████╗  ██████╗ ███╗   ██╗███████╗██╗ ██████╗
--- ██╔════╝██╔═══██╗████╗  ██║██╔════╝██║██╔════╝
--- ██║     ██║   ██║██╔██╗ ██║█████╗  ██║██║  ███╗
--- ██║     ██║   ██║██║╚██╗██║██╔══╝  ██║██║   ██║
--- ╚██████╗╚██████╔╝██║ ╚████║██║     ██║╚██████╔╝
---  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝
+-- CONFIG
 -- ============================================================
 local CONFIG = {
 
     -- ── DUTY SETTINGS ─────────────────────────────────────────
-    -- How many Mistwake runs to complete before heading to GC.
-    -- After this many runs the seal turn-in / buy loop triggers,
-    -- then the dungeon loop resets and runs again.
-    runs_per_cycle = 5,
-
-    -- AutoDuty uses internal content IDs. Mistwake (patch 7.4)
-    -- content ID is 1017. Verify with /ad list in-game if needed.
-    autoduty_content_id = 1017,
-
-    -- Seconds to wait for AutoDuty to finish one full run before
-    -- the script times out and retries. 30-min cap is safe.
-    duty_timeout = 1800,
+    runs_per_cycle       = 5,
+    autoduty_content_id  = 1017,   -- Mistwake patch 7.4
+    duty_timeout         = 1800,   -- 30 min hard cap per run
 
     -- ── GRAND COMPANY ─────────────────────────────────────────
-    -- Which GC are you in?
-    --   1 = Maelstrom       (Limsa Lominsa)
-    --   2 = Order of the Twin Adder (Gridania)
-    --   3 = Immortal Flames  (Ul'dah)
-    grand_company = 1,
+    -- 1 = Maelstrom (Limsa)  2 = Twin Adder (Gridania)  3 = Flames (Ul'dah)
+    grand_company  = 1,
+    seal_cap       = 90000,
+    seal_reserve   = 1500,
 
-    -- Max seals your character can hold (default 90,000 at max rank)
-    seal_cap = 90000,
-
-    -- Stop buying Duckbones when seals drop below this threshold
-    -- to leave a small reserve (avoids over-spending edge case)
-    seal_reserve = 1500,
-
-    -- Duckbone item ID (used for inventory count checks)
-    -- Duckbone (food item) = 39228  [Maelstrom/Flames/Adder shop]
-    -- If you prefer a different cheap GC item, swap the ID and
-    -- update buy_item_shop_index below to match its shop row.
+    -- ── BUY ITEM ──────────────────────────────────────────────
     buy_item_name        = "Duckbone",
-    buy_item_shop_index  = 0,     -- 0-based row in GCShop list (adjust if needed)
-    buy_item_seal_cost   = 200,   -- seal cost per Duckbone stack purchase
+    buy_item_shop_index  = 0,      -- 0-based row in GCShop; verify in-game
+    buy_item_seal_cost   = 200,
 
     -- ── GC TELEPORT & NAVIGATION ──────────────────────────────
-    -- Lifestream /tp command name for your GC city:
-    --   Maelstrom  → "Limsa Lominsa Lower Decks"
-    --   Twin Adder → "New Gridania"
-    --   Flames     → "Ul'dah - Steps of Nald"
-    gc_tp_name = "Limsa Lominsa Lower Decks",
+    -- Maelstrom defaults — swap coords/names for your GC if needed
+    gc_tp_name   = "Limsa Lominsa Lower Decks",
+    gc_zone_id   = 129,
 
-    -- Zone ID for your GC home city
-    --   Limsa Lower Decks = 129
-    --   New Gridania      = 133
-    --   Ul'dah Steps Nald = 130
-    gc_zone_id = 129,
+    gc_officer_x = -67.8,
+    gc_officer_y =  21.4,
+    gc_officer_z = -18.1,
 
-    -- Personnel Officer (Expert Delivery NPC) coords.
-    -- Maelstrom: The Aftcastle, Limsa Lower Decks
-    gc_officer_x =  -67.8,
-    gc_officer_y =   21.4,
-    gc_officer_z =  -18.1,
-
-    -- GC Shop (Exchange Officer / Quartermaster) coords.
-    -- Maelstrom: same room, slightly different position
-    gc_shop_x    =  -72.2,
-    gc_shop_y =     21.4,
-    gc_shop_z    =  -14.9,
+    gc_shop_x    = -72.2,
+    gc_shop_y    =  21.4,
+    gc_shop_z    = -14.9,
 
     -- ── TIMING ────────────────────────────────────────────────
-    -- Generic interaction delay (seconds)
     interact_delay = 1.5,
-    -- Navigation arrival tolerance (yalms)
     nav_stop_dist  = 3.0,
 }
 
 -- ============================================================
--- GC LOOKUP TABLE
--- NPC target names vary per GC. Edit if your client uses a
--- different locale or if SE ever renames them.
+-- BLACKLIST / WHITELIST CONFIG
+-- ============================================================
+-- LIST_MODE:
+--   "blacklist" = turn in EVERYTHING except items in ITEM_LIST
+--   "whitelist" = ONLY turn in items that ARE in ITEM_LIST
+--
+-- Find item IDs by hovering an item and running: /snd echo {itemid}
+-- Or run the dungeon once with an empty list — drop IDs print to log.
+-- ============================================================
+
+local LIST_MODE = "blacklist"   -- "blacklist" or "whitelist"
+
+local ITEM_LIST = {
+    -- FORMAT:  [itemID] = "descriptive name for logging",
+    --
+    -- BLACKLIST example (items to KEEP, never turn in):
+    -- [44301] = "Mistwake Coat of Fending",
+    -- [44305] = "Mistwake Circlet of Casting",
+    --
+    -- WHITELIST example (ONLY these get turned in):
+    -- [44302] = "Mistwake Breeches of Fending",
+    -- [44308] = "Mistwake Gauntlets of Maiming",
+}
+
+-- ============================================================
+-- GC NPC NAMES
 -- ============================================================
 local GC_OFFICER_NAMES = {
     [1] = "Storm Personnel Officer",
@@ -114,11 +98,10 @@ local total_runs_completed = 0
 local total_cycles         = 0
 local total_seals_earned   = 0
 local total_duckbones      = 0
-local run_start_seals      = 0
 local script_start_time    = os.time()
 
 -- ============================================================
--- UTILITY
+-- UTILITY FUNCTIONS
 -- ============================================================
 
 local function Log(msg)
@@ -187,7 +170,7 @@ local function TeleportTo(name, zone_id)
         t = t + 1
     end
     if not IsInZone(zone_id) then
-        Log("ERROR: Teleport to " .. name .. " failed (zone mismatch)")
+        Log("ERROR: Teleport to " .. name .. " failed")
         return false
     end
     Wait(2)
@@ -195,13 +178,7 @@ local function TeleportTo(name, zone_id)
 end
 
 local function GetCurrentSeals()
-    -- SND exposes GetGrandCompanySeals() → returns current seal count
-    local seals = GetGrandCompanySeals()
-    return seals or 0
-end
-
-local function SealsToNextCap()
-    return CONFIG.seal_cap - GetCurrentSeals()
+    return GetGrandCompanySeals() or 0
 end
 
 local function FormatTime(secs)
@@ -224,22 +201,94 @@ local function PrintStats()
 end
 
 -- ============================================================
+-- INVENTORY UTILITIES
+-- ============================================================
+
+local INVENTORY_BAGS = {0, 1, 2, 3}
+
+local function SnapshotInventory()
+    local snapshot = {}
+    for _, bag in ipairs(INVENTORY_BAGS) do
+        for slot = 0, 34 do
+            local item = GetInventoryItem(bag, slot)
+            if item and item.ItemId and item.ItemId ~= 0 then
+                local id = item.ItemId
+                snapshot[id] = (snapshot[id] or 0) + (item.Count or 1)
+            end
+        end
+    end
+    return snapshot
+end
+
+local function LogNewDrops(before, after)
+    local any = false
+    for id, count in pairs(after) do
+        local gained = count - (before[id] or 0)
+        if gained > 0 then
+            local name = ITEM_LIST[id] or ("ItemID " .. id)
+            Log(string.format("  DROP: %s x%d (ID: %d)", name, gained, id))
+            any = true
+        end
+    end
+    if not any then
+        Log("  No new items detected in inventory this run.")
+    end
+end
+
+local function ShouldTurnIn(item_id)
+    local in_list = ITEM_LIST[item_id] ~= nil
+
+    if LIST_MODE == "whitelist" then
+        if in_list then
+            Log(string.format("  [WHITELIST] Turning in item %d (%s)",
+                item_id, ITEM_LIST[item_id]))
+            return true
+        else
+            return false
+        end
+    elseif LIST_MODE == "blacklist" then
+        if in_list then
+            Log(string.format("  [BLACKLIST] Skipping protected item %d (%s)",
+                item_id, ITEM_LIST[item_id]))
+            return false
+        else
+            return true
+        end
+    end
+    return true
+end
+
+local function GetDeliverableItems()
+    local deliverable = {}
+    for _, bag in ipairs(INVENTORY_BAGS) do
+        for slot = 0, 34 do
+            local item = GetInventoryItem(bag, slot)
+            if item and item.ItemId and item.ItemId ~= 0 then
+                if ShouldTurnIn(item.ItemId) then
+                    table.insert(deliverable, {
+                        id   = item.ItemId,
+                        name = ITEM_LIST[item.ItemId] or ("ItemID " .. item.ItemId),
+                        bag  = bag,
+                        slot = slot,
+                    })
+                end
+            end
+        end
+    end
+    return deliverable
+end
+
+-- ============================================================
 -- PHASE 1 — AUTODUTY DUNGEON RUNS
 -- ============================================================
 
 local function WaitForDutyComplete(timeout)
-    -- Poll until AutoDuty reports it's no longer running.
-    -- AutoDuty exposes /ad status — we check IsAddonVisible
-    -- for the duty complete screen OR poll GetCharacterCondition.
-    -- Condition 34 = bound by duty; when it drops, duty is done.
     Log("Waiting for duty to complete (timeout " .. timeout .. "s)...")
     local elapsed = 0
-    -- First wait a moment for the duty to actually start
     Wait(15)
     while elapsed < timeout do
-        -- Condition 34 = BoundByDuty
         if not GetCharacterCondition(34) then
-            Log("Duty complete flag cleared — run finished")
+            Log("Duty complete — run finished")
             return true
         end
         Wait(5)
@@ -256,157 +305,163 @@ local function RunDungeonCycle(num_runs)
     Log(string.format("=== DUNGEON PHASE: %d runs of Mistwake ===", num_runs))
 
     for run = 1, num_runs do
-        Log(string.format("--- Starting run %d/%d (total: %d) ---",
+        Log(string.format("--- Run %d/%d (total: %d) ---",
             run, num_runs, total_runs_completed + 1))
 
-        -- Make sure we're not already in a duty
+        -- Wait if somehow already in a duty
         if GetCharacterCondition(34) then
-            Log("WARN: Already in duty at run start — waiting for it to clear...")
+            Log("WARN: Already in duty — waiting to clear...")
             local t = 0
             while GetCharacterCondition(34) and t < 600 do
                 Wait(5) ; t = t + 5
             end
         end
 
+        -- Snapshot inventory before run
+        local snap_before = SnapshotInventory()
+
         -- Queue Mistwake via AutoDuty
-        -- /autoduty start <contentID> — uses Trust/Duty Support
         Log("Queuing Mistwake (content ID " .. CONFIG.autoduty_content_id .. ")")
         yield("/autoduty start " .. CONFIG.autoduty_content_id)
         Wait(5)
 
-        -- Wait for duty to load (condition 34 = BoundByDuty)
+        -- Wait for duty to load
         local queue_timeout = 300
         local qt = 0
         while not GetCharacterCondition(34) and qt < queue_timeout do
             Wait(5) ; qt = qt + 5
         end
         if not GetCharacterCondition(34) then
-            Log("ERROR: Never entered duty after " .. queue_timeout .. "s — skipping run")
+            Log("ERROR: Never entered duty — skipping run")
             goto next_run
         end
 
-        -- Wait for the duty run to finish
+        -- Wait for run to finish
         local ok = WaitForDutyComplete(CONFIG.duty_timeout)
         if not ok then
-            Log("ERROR: Duty timed out — attempting to leave")
+            Log("ERROR: Duty timed out — leaving")
             yield("/dutyleave")
             Wait(10)
         end
 
+        -- Log what dropped
+        Log("--- Loot this run ---")
+        LogNewDrops(snap_before, SnapshotInventory())
+
         total_runs_completed = total_runs_completed + 1
-        Log(string.format("Run %d complete. Total runs: %d | Seals: %d",
+        Log(string.format("Run %d complete | Total: %d | Seals: %d",
             run, total_runs_completed, GetCurrentSeals()))
 
-        -- Brief cooldown between runs
         Wait(5)
-
         ::next_run::
     end
 
-    Log(string.format("=== Dungeon phase done. %d total runs completed ===",
+    Log(string.format("=== Dungeon phase done. %d total runs ===",
         total_runs_completed))
 end
 
 -- ============================================================
--- PHASE 2 — EXPERT DELIVERY (turn in armor for seals)
+-- PHASE 2 — EXPERT DELIVERY
 -- ============================================================
 
 local function DoExpertDelivery()
     Log("=== EXPERT DELIVERY PHASE ===")
+    Log(string.format("Mode: %s | List size: %d",
+        LIST_MODE:upper(), (function()
+            local n = 0
+            for _ in pairs(ITEM_LIST) do n = n + 1 end
+            return n
+        end)()))
 
-    -- Navigate to Personnel Officer
+    local deliverable = GetDeliverableItems()
+    if #deliverable == 0 then
+        Log("No deliverable items found — skipping delivery phase")
+        return
+    end
+
+    Log(string.format("Found %d item(s) eligible for delivery:", #deliverable))
+    for _, item in ipairs(deliverable) do
+        Log(string.format("  → %s (ID: %d)", item.name, item.id))
+    end
+
     MoveToCoords(CONFIG.gc_officer_x, CONFIG.gc_officer_y, CONFIG.gc_officer_z)
 
-    -- Target and interact
     local npc = GC_OFFICER_NAMES[CONFIG.grand_company]
     yield("/target " .. npc)
     Wait(1)
     yield("/interact")
     Wait(CONFIG.interact_delay)
 
-    -- Personnel Officer opens a SelectString menu.
-    -- Option layout (0-indexed):
-    --   0 = View your standing
-    --   1 = Expert Delivery (turn in gear for seals)
-    --   2 = View Grand Company Ranks
-    --   3 = Cancel
     if not WaitFor("SelectString", 10) then
         Log("ERROR: Personnel Officer menu did not open")
         return
     end
 
-    -- Select "Expert Delivery" (index 1)
-    yield("/callback SelectString true 1")
+    yield("/callback SelectString true 1")   -- Expert Delivery
     Wait(CONFIG.interact_delay)
 
-    -- GrandCompanySupplyList is the expert delivery window
     if not WaitFor("GrandCompanySupplyList", 10) then
         Log("ERROR: Expert Delivery window did not open")
         CloseAddon("SelectString")
         return
     end
 
-    Log("Expert Delivery window open. Turning in items...")
-
-    -- The window shows deliverable items in a list. Each row can
-    -- be clicked (callback index 0 = select item at slot N,
-    -- then a confirm dialog appears).
-    -- We loop: click item at slot 0 (always first available),
-    -- confirm delivery, repeat until list is empty or seals cap.
+    Log("Expert Delivery window open. Processing items...")
 
     local items_turned_in = 0
-    local seal_before = GetCurrentSeals()
-
-    local max_attempts = 50   -- safety cap — no dungeon drops 50 items
-    local attempt = 0
+    local items_skipped   = 0
+    local seal_before     = GetCurrentSeals()
+    local max_attempts    = 60
+    local attempt         = 0
+    local current_row     = 0
+    local total_rows      = #deliverable
 
     while attempt < max_attempts do
         attempt = attempt + 1
 
-        -- Refresh: is the window still open and are there items?
         if not IsAddonVisible("GrandCompanySupplyList") then
-            Log("Expert delivery window closed — done delivering")
+            Log("Delivery window closed")
             break
         end
 
-        -- Check seal cap: stop if we're at or very near cap
-        local cur_seals = GetCurrentSeals()
-        if cur_seals >= CONFIG.seal_cap - 100 then
-            Log(string.format("Seals at cap (%d) — stopping delivery", cur_seals))
+        if GetCurrentSeals() >= CONFIG.seal_cap - 100 then
+            Log(string.format("Seals at cap (%d) — stopping delivery", GetCurrentSeals()))
             break
         end
 
-        -- Try to select item at list row 0 (always the first available item).
-        -- Callback: GrandCompanySupplyList, true, 0, <slot_index>
-        yield("/callback GrandCompanySupplyList true 0 0")
-        Wait(CONFIG.interact_delay)
+        if current_row >= total_rows then
+            Log("Reached end of item list")
+            break
+        end
 
-        -- A SelectYesno confirmation should appear
-        if IsAddonVisible("SelectYesno") then
-            yield("/callback SelectYesno true 0")   -- "Yes"
-            Wait(CONFIG.interact_delay)
-            items_turned_in = items_turned_in + 1
-            Log(string.format("Turned in item #%d | Seals: %d",
-                items_turned_in, GetCurrentSeals()))
-        elseif IsAddonVisible("GrandCompanySupplyList") then
-            -- No confirm dialog appeared — list may be empty or item was non-selectable
-            -- Try checking if list is actually empty by checking node text
-            local list_count_text = GetNodeText("GrandCompanySupplyList", 12)
-            if list_count_text == "0" or list_count_text == nil or list_count_text == "" then
-                Log("No more items available for expert delivery")
-                break
-            end
-            -- If we got here with a non-empty list but no confirm, something is off
-            -- Wait a moment and retry once
-            Wait(1)
+        local item = deliverable[current_row + 1]
+        if item == nil then break end
+
+        if not ShouldTurnIn(item.id) then
+            Log(string.format("Skipping row %d: %s", current_row, item.name))
+            current_row = current_row + 1
+            items_skipped = items_skipped + 1
         else
-            -- Neither window — something unexpected happened
-            Log("WARN: Neither delivery nor confirm window visible — breaking")
-            break
+            yield("/callback GrandCompanySupplyList true 0 " .. current_row)
+            Wait(CONFIG.interact_delay)
+
+            if IsAddonVisible("SelectYesno") then
+                yield("/callback SelectYesno true 0")
+                Wait(CONFIG.interact_delay)
+                items_turned_in = items_turned_in + 1
+                Log(string.format("Delivered: %s | Seals now: %d",
+                    item.name, GetCurrentSeals()))
+                -- Rescan after each delivery since list shifts
+                deliverable = GetDeliverableItems()
+                current_row = items_skipped
+                total_rows  = #deliverable + items_skipped
+            else
+                Log(string.format("WARN: No confirm for row %d — advancing", current_row))
+                current_row = current_row + 1
+            end
         end
     end
 
-    -- Close the window
     CloseAddon("GrandCompanySupplyList")
     Wait(1)
     CloseAddon("SelectString")
@@ -415,12 +470,13 @@ local function DoExpertDelivery()
     local seals_gained = GetCurrentSeals() - seal_before
     total_seals_earned = total_seals_earned + math.max(0, seals_gained)
 
-    Log(string.format("Expert delivery complete: %d items turned in | +%d seals | Total seals now: %d",
-        items_turned_in, seals_gained, GetCurrentSeals()))
+    Log(string.format(
+        "Delivery complete: %d turned in | %d skipped | +%d seals | Seals now: %d",
+        items_turned_in, items_skipped, seals_gained, GetCurrentSeals()))
 end
 
 -- ============================================================
--- PHASE 3 — BUY DUCKBONES WITH SEALS
+-- PHASE 3 — BUY DUCKBONES
 -- ============================================================
 
 local function BuyDuckbones()
@@ -428,12 +484,11 @@ local function BuyDuckbones()
 
     local seals_before = GetCurrentSeals()
     if seals_before <= CONFIG.seal_reserve then
-        Log(string.format("Not enough seals to buy (%d <= reserve %d), skipping",
+        Log(string.format("Not enough seals (%d <= reserve %d) — skipping",
             seals_before, CONFIG.seal_reserve))
         return
     end
 
-    -- Navigate to Quartermaster / Shop NPC
     MoveToCoords(CONFIG.gc_shop_x, CONFIG.gc_shop_y, CONFIG.gc_shop_z)
 
     local shop_npc = GC_SHOP_NAMES[CONFIG.grand_company]
@@ -442,17 +497,11 @@ local function BuyDuckbones()
     yield("/interact")
     Wait(CONFIG.interact_delay)
 
-    -- Quartermaster opens a SelectString (or directly opens shop)
-    -- Maelstrom layout (0-indexed):
-    --   0 = Purchase Items
-    --   1 = Exchange Items
-    --   2 = Cancel
     if WaitFor("SelectString", 8) then
         yield("/callback SelectString true 0")   -- "Purchase Items"
         Wait(CONFIG.interact_delay)
     end
 
-    -- GCShop is the shop window
     if not WaitFor("GCShop", 10) then
         Log("ERROR: GC Shop window did not open")
         CloseAddon("SelectString")
@@ -461,8 +510,6 @@ local function BuyDuckbones()
 
     Log("GC Shop open. Buying Duckbones...")
 
-    -- GCShop tabs: 0 = Materiel (general supplies including food)
-    -- Click tab 0 to make sure we're on the right page
     yield("/callback GCShop true 0")
     Wait(1)
 
@@ -471,30 +518,23 @@ local function BuyDuckbones()
     while true do
         local cur_seals = GetCurrentSeals()
         if cur_seals - CONFIG.buy_item_seal_cost < CONFIG.seal_reserve then
-            Log(string.format("Seals too low to buy another stack (%d, reserve %d)",
-                cur_seals, CONFIG.seal_reserve))
+            Log(string.format("Seals too low for another purchase (%d) — done", cur_seals))
             break
         end
 
-        -- Select item at shop row CONFIG.buy_item_shop_index
-        -- GCShop callback: index 0 = select row, second arg = row number
         yield("/callback GCShop true 0 " .. CONFIG.buy_item_shop_index)
         Wait(CONFIG.interact_delay)
 
-        -- A quantity/confirm dialog appears: ShopExchangeDialog or SelectYesno
         if IsAddonVisible("ShopExchangeDialog") then
-            -- Set quantity to max we can afford and confirm
             local max_qty = math.floor(
                 (cur_seals - CONFIG.seal_reserve) / CONFIG.buy_item_seal_cost
             )
             max_qty = math.max(1, math.min(max_qty, 99))
-            -- Set quantity field (node 6 is typically the quantity input)
             yield("/callback ShopExchangeDialog true 0 " .. max_qty .. " 0")
             Wait(CONFIG.interact_delay)
             bought = bought + max_qty
-            Log(string.format("Bought %d Duckbones | Seals remaining: %d",
-                max_qty, GetCurrentSeals()))
-            -- After a bulk buy, check if we're done
+            Log(string.format("Bought %d %s | Seals remaining: %d",
+                max_qty, CONFIG.buy_item_name, GetCurrentSeals()))
             if GetCurrentSeals() - CONFIG.buy_item_seal_cost < CONFIG.seal_reserve then
                 break
             end
@@ -503,11 +543,10 @@ local function BuyDuckbones()
             Wait(CONFIG.interact_delay)
             bought = bought + 1
         elseif IsAddonVisible("GCShop") then
-            -- Item row click didn't trigger a dialog — may be wrong row
             Log("WARN: Buy dialog did not appear. Check buy_item_shop_index in CONFIG.")
             break
         else
-            Log("WARN: GCShop window closed unexpectedly")
+            Log("WARN: GCShop closed unexpectedly")
             break
         end
     end
@@ -517,8 +556,8 @@ local function BuyDuckbones()
     CloseAddon("SelectString")
 
     total_duckbones = total_duckbones + bought
-    Log(string.format("Bought %d Duckbones this cycle | Total bought: %d | Seals: %d",
-        bought, total_duckbones, GetCurrentSeals()))
+    Log(string.format("Bought %d %s this cycle | Total: %d | Seals: %d",
+        bought, CONFIG.buy_item_name, total_duckbones, GetCurrentSeals()))
 end
 
 -- ============================================================
@@ -526,20 +565,20 @@ end
 -- ============================================================
 
 Log("╔══════════════════════════════════════╗")
-Log("║   Mistwake Gil Farming Script v1.0   ║")
+Log("║   Mistwake Gil Farming Script v1.1   ║")
 Log("╚══════════════════════════════════════╝")
-Log(string.format("Config: %d runs/cycle | GC: %d | Seal cap: %d",
-    CONFIG.runs_per_cycle, CONFIG.grand_company, CONFIG.seal_cap))
+Log(string.format("Config: %d runs/cycle | GC: %d | Mode: %s | Seal cap: %d",
+    CONFIG.runs_per_cycle, CONFIG.grand_company,
+    LIST_MODE:upper(), CONFIG.seal_cap))
 Log("Script will loop until manually stopped.")
 Log("")
 
--- Sanity checks
 if not HasPlugin("AutoDuty") then
-    Log("FATAL: AutoDuty plugin not found — install it first!")
+    Log("FATAL: AutoDuty plugin not found!")
     return
 end
 if not HasPlugin("vnavmesh") then
-    Log("FATAL: vnavmesh not found — navigation will fail!")
+    Log("FATAL: vnavmesh not found!")
     return
 end
 
@@ -547,46 +586,36 @@ while true do
     total_cycles = total_cycles + 1
     Log(string.format("════ CYCLE %d START ════", total_cycles))
 
-    -- ── Phase 1: Dungeon runs ──────────────────────────────────
     local ok, err = pcall(RunDungeonCycle, CONFIG.runs_per_cycle)
     if not ok then
         Log("ERROR in dungeon phase: " .. tostring(err))
-        Log("Attempting to recover — leaving duty if needed...")
         if GetCharacterCondition(34) then
             yield("/dutyleave")
             Wait(15)
         end
     end
 
-    -- ── Teleport to GC city ───────────────────────────────────
     local tp_ok = TeleportTo(CONFIG.gc_tp_name, CONFIG.gc_zone_id)
     if not tp_ok then
-        Log("ERROR: Could not reach GC — retrying cycle...")
+        Log("ERROR: Could not reach GC — retrying next cycle...")
         Wait(10)
         goto cycle_end
     end
 
-    -- Small buffer after zone load
     Wait(3)
 
-    -- ── Phase 2: Expert delivery ──────────────────────────────
     local del_ok, del_err = pcall(DoExpertDelivery)
     if not del_ok then
         Log("ERROR in delivery phase: " .. tostring(del_err))
     end
 
-    -- ── Phase 3: Buy Duckbones ────────────────────────────────
     local buy_ok, buy_err = pcall(BuyDuckbones)
     if not buy_ok then
         Log("ERROR in buy phase: " .. tostring(buy_err))
     end
 
     ::cycle_end::
-
-    -- Print cycle summary
     PrintStats()
     Log(string.format("════ CYCLE %d END ════", total_cycles))
-
-    -- Brief rest before next cycle
     Wait(5)
 end
