@@ -614,9 +614,9 @@ while true do
     total_cycles = total_cycles + 1
     EchoLog(string.format("════ CYCLE %d START ════", total_cycles))
 
-    local ok, err = pcall(RunDungeonCycle, runs_per_cycle)
-    if not ok then
-        Log("ERROR in dungeon phase: " .. tostring(err))
+    local run_ok, run_err = pcall(RunDungeonCycle, runs_per_cycle)
+    if not run_ok then
+        Log("ERROR in dungeon phase: " .. tostring(run_err))
         if GetCharacterCondition(34) then
             yield("/dutyleave") ; Wait(15)
         end
@@ -624,20 +624,20 @@ while true do
 
     local gc_zone = CONFIG.gc_zone[gc_index]
     local gc_tp   = CONFIG.gc_tp[gc_index]
+    local tp_ok   = TeleportTo(gc_tp, gc_zone)
 
-    if not TeleportTo(gc_tp, gc_zone) then
+    if tp_ok then
+        Wait(3)
+
+        local del_ok, del_err = pcall(DoExpertDelivery)
+        if not del_ok then Log("ERROR in delivery: " .. tostring(del_err)) end
+
+        local buy_ok, buy_err = pcall(BuyDuckbones)
+        if not buy_ok then Log("ERROR in buy phase: " .. tostring(buy_err)) end
+    else
         Log("ERROR: Could not reach GC — skipping to next cycle")
-        goto cycle_end
     end
-    Wait(3)
 
-    local ok2, err2 = pcall(DoExpertDelivery)
-    if not ok2 then Log("ERROR in delivery: " .. tostring(err2)) end
-
-    local ok3, err3 = pcall(BuyDuckbones)
-    if not ok3 then Log("ERROR in buy phase: " .. tostring(err3)) end
-
-    ::cycle_end::
     PrintStats()
     EchoLog(string.format("════ CYCLE %d END ════", total_cycles))
     Wait(5)
