@@ -157,7 +157,7 @@ local script_start_time    = os.time()
 local PREFIX = "[GIL_MISTWAKE]"
 
 local function Log(msg)
-    LogInfo(PREFIX .. " " .. tostring(msg))
+    Dalamud.Log(PREFIX .. " " .. tostring(msg))
 end
 
 local function Echo(msg)
@@ -165,8 +165,8 @@ local function Echo(msg)
 end
 
 local function EchoLog(msg)
-    Log(msg)
-    Echo(msg)
+    Dalamud.Log(PREFIX .. " " .. tostring(msg))
+    yield("/echo " .. PREFIX .. " " .. tostring(msg))
 end
 
 -- ============================================================
