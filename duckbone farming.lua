@@ -259,18 +259,22 @@ local function PrintStats()
 end
 
 -- ============================================================
--- INVENTORY / FILTER UTILITIES
+-- INVENTORY UTILITIES
 -- ============================================================
 
-local INVENTORY_BAGS = {0, 1, 2, 3}
+-- Snapshot using known Mistwake drop IDs.
+-- Since we can't enumerate bags directly, we track counts of
+-- all items in the protected list plus any we've seen drop.
+-- For loot logging we use a broad container scan via Inventory.
 
 local function SnapshotInventory()
     local snap = {}
-    for _, bag in ipairs(INVENTORY_BAGS) do
+    -- Scan all 4 inventory pages (container IDs 0-3)
+    for bag = 0, 3 do
         for slot = 0, 34 do
-            local item = GetInventoryItem(bag, slot)
-            if item and item.ItemId and item.ItemId ~= 0 then
-                snap[item.ItemId] = (snap[item.ItemId] or 0) + (item.Count or 1)
+            local itemId = Inventory.GetSlotItemId(bag, slot)
+            if itemId and itemId ~= 0 then
+                snap[itemId] = (snap[itemId] or 0) + 1
             end
         end
     end
@@ -283,11 +287,11 @@ local function LogNewDrops(before, after)
         local gained = count - (before[id] or 0)
         if gained > 0 then
             local label = ITEM_LIST[id] and ("(protected) ID:"..id) or ("ID:"..id)
-            Log(string.format("  DROP: %s x%d", label, gained))
+            Dalamud.Log(PREFIX .. " DROP: " .. label .. " x" .. gained)
             any = true
         end
     end
-    if not any then Log("  No new items this run.") end
+    if not any then Dalamud.Log(PREFIX .. " No new items this run.") end
 end
 
 local function ShouldTurnIn(item_id)
@@ -300,16 +304,14 @@ end
 
 local function GetDeliverableItems()
     local out = {}
-    for _, bag in ipairs(INVENTORY_BAGS) do
+    for bag = 0, 3 do
         for slot = 0, 34 do
-            local item = GetInventoryItem(bag, slot)
-            if item and item.ItemId and item.ItemId ~= 0 then
-                if ShouldTurnIn(item.ItemId) then
+            local itemId = Inventory.GetSlotItemId(bag, slot)
+            if itemId and itemId ~= 0 then
+                if ShouldTurnIn(itemId) then
                     table.insert(out, {
-                        id   = item.ItemId,
-                        bag  = bag,
-                        slot = slot,
-                        label = "ID:" .. item.ItemId,
+                        id    = itemId,
+                        label = "ID:" .. itemId,
                     })
                 end
             end
