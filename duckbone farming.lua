@@ -577,7 +577,7 @@ local function BuyDuckbones()
 end
 
 -- ============================================================
--- STARTUP CHECKS
+-- STARTUP
 -- ============================================================
 
 EchoLog("╔══════════════════════════════════════╗")
@@ -591,19 +591,7 @@ if item_id_str ~= "" then
     for id in pairs(ITEM_LIST) do table.insert(ids, tostring(id)) end
     EchoLog("Protected IDs: " .. table.concat(ids, ", "))
 else
-    EchoLog("No item IDs configured — " ..
-        (list_mode == "off" and "turning in everything" or
-         list_mode == "blacklist" and "turning in everything (empty blacklist)" or
-         "whitelist is empty — nothing will be delivered"))
-end
-
-if not HasPlugin("AutoDuty") then
-    EchoLog("FATAL: AutoDuty not found!")
-    return
-end
-if not HasPlugin("vnavmesh") then
-    EchoLog("FATAL: vnavmesh not found!")
-    return
+    EchoLog("No item IDs configured.")
 end
 
 -- ============================================================
