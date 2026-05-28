@@ -201,7 +201,7 @@ local function CloseAddon(addon)
 end
 
 local function IsInZone(zone_id)
-    return GetZoneID() == zone_id
+    return Svc.ClientState.TerritoryType == zone_id
 end
 
 local function MoveToCoords(x, y, z)
