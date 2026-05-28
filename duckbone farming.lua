@@ -219,17 +219,17 @@ local function MoveToCoords(x, y, z)
 end
 
 local function TeleportTo(tp_name, zone_id)
-    if IsInZone(zone_id) then return true end
+    if Svc.ClientState.TerritoryType == zone_id then return true end
     Log("Teleporting to " .. tp_name)
-    yield("/tp " .. tp_name)
-    Wait(2)
+    IPC.Lifestream.ExecuteCommand(tp_name)
     local t = 0
-    while not IsInZone(zone_id) and t < 30 do
-        Wait(1) ; t = t + 1
-    end
-    if not IsInZone(zone_id) then
-        Log("ERROR: Teleport to " .. tp_name .. " failed")
-        return false
+    while IPC.Lifestream.IsBusy() or Svc.ClientState.TerritoryType ~= zone_id do
+        Wait(1)
+        t = t + 1
+        if t > 30 then
+            Log("ERROR: Teleport to " .. tp_name .. " failed")
+            return false
+        end
     end
     Wait(2)
     return true
