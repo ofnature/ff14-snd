@@ -327,7 +327,7 @@ local function WaitForDutyComplete(timeout)
     local elapsed = 0
     Wait(15)
     while elapsed < timeout do
-        if not GetCondition(34) then
+        if not Svc.Condition[34] then
             Log("Duty complete")
             return true
         end
@@ -347,10 +347,10 @@ local function RunDungeonCycle(num_runs)
         EchoLog(string.format("-- Run %d/%d (total %d) --",
             run, num_runs, total_runs_completed + 1))
 
-        if GetCondition(34) then
+        if Svc.Condition[34] then
             Log("Already in duty at start — waiting to clear...")
             local t = 0
-            while GetCondition(34) and t < 600 do
+            while Svc.Condition[34] and t < 600 do
                 Wait(5) ; t = t + 5
             end
         end
@@ -363,10 +363,10 @@ local function RunDungeonCycle(num_runs)
 
         -- Wait for duty to load
         local qt = 0
-        while not GetCondition(34) and qt < 300 do
+        while not Svc.Condition[34] and qt < 300 do
             Wait(5) ; qt = qt + 5
         end
-        if not GetCondition(34) then
+        if not Svc.Condition[34] then
             Log("ERROR: Never entered duty — skipping run")
             goto next_run
         end
@@ -605,7 +605,7 @@ while true do
     local run_ok, run_err = pcall(RunDungeonCycle, runs_per_cycle)
     if not run_ok then
         Log("ERROR in dungeon phase: " .. tostring(run_err))
-        if GetCondition(34) then
+        if Svc.Condition[34] then
             yield("/dutyleave") ; Wait(15)
         end
     end
