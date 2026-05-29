@@ -238,7 +238,7 @@ end
 local function GetCurrentSeals()
     local seal_ids = {[1]=20, [2]=21, [3]=22}
     local seal_id = seal_ids[gc_index] or 20
-    return GetItemCount(seal_id) or 0
+    return Inventory.GetItemCount(seal_id) or 0
 end
 
 local function FormatTime(secs)
