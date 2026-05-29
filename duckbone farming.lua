@@ -327,7 +327,7 @@ end
 local function StopAutoDuty()
     if IPC and IPC.AutoDuty and IPC.AutoDuty.Stop then
         IPC.AutoDuty.Stop()
-        Sleep(TIME.STABLE)
+        sleep(TIME.POLL)
     end
 end
 
@@ -338,7 +338,7 @@ local function StartAutoDuty(dungeonId, numRuns)
     end
     Log("Starting AutoDuty: dungeonId=%d runs=%d", dungeonId, numRuns)
     IPC.AutoDuty.Run(dungeonId, numRuns, false)
-    Sleep(TIME.STABLE)
+    sleep(TIME.POLL)
     return true
 end
 
@@ -716,11 +716,11 @@ local function DoExpertDelivery()
         else
             -- Click item row in delivery window
             SafeCallback("GrandCompanySupplyList", true, 0, current_row)
-            Sleep(TIME.STABLE)
+            sleep(TIME.POLL)
 
             if IsAddonVisible("SelectYesno") then
                 SafeCallback("SelectYesno", true, 0)
-                Sleep(TIME.STABLE)
+                sleep(TIME.POLL)
                 items_turned_in = items_turned_in + 1
                 Log("Delivered %s | Seals: %d", item.label, GetCurrentSeals())
 
