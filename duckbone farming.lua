@@ -1,16 +1,15 @@
 --[=====[
 [[SND Metadata]]
 author: ofnature
-version: 1.2.0
+version: 2.0.0
 description: |
-  Run Mistwake repeatedly, turn in armor loot to Grand Company Expert Delivery,
-  then spend seals on Duckbones. Loops until stopped.
-  Requires: AutoDuty, vnavmesh, Lifestream, YesAlready, TextAdvance
-
+  Run Mistwake repeatedly via AutoDuty, turn in armor loot to Grand Company
+  Expert Delivery for seals, then spend seals on Duckbones. Loops until stopped.
+  Open AutoDuty, pick your trust party, then close it before starting.
 plugin_dependencies:
-  - AutoDuty
-  - vnavmesh
-  - Lifestream
+- AutoDuty
+- Lifestream
+- vnavmesh
 
 configs:
   Runs Per Cycle:
@@ -27,12 +26,12 @@ configs:
 
   List Mode:
     description: |
-      Blacklist = turn in everything EXCEPT items in your protected list.
-      Whitelist = ONLY turn in items that are in your list.
+      Blacklist = turn in everything EXCEPT item IDs in your list.
+      Whitelist = ONLY turn in item IDs that are in your list.
       Off       = turn in everything, ignore the item list entirely.
-    default: "Blacklist"
+    default: "Off"
     is_choice: true
-    choices: ["Blacklist", "Whitelist", "Off"]
+    choices: ["Off", "Blacklist", "Whitelist"]
 
   Protected Item IDs:
     description: |
@@ -42,7 +41,7 @@ configs:
     default: ""
 
   Seal Cap:
-    description: Maximum seals your character can hold. Default is 90000 at max GC rank.
+    description: Maximum seals your character can hold. Default 90000 at max GC rank.
     default: 90000
     min: 10000
     max: 90000
@@ -56,7 +55,7 @@ configs:
   Duckbone Shop Row:
     description: |
       0-based row index of Duckbones in the GC Shop item list.
-      Open the shop manually and count from 0 to find the right row.
+      Open the shop manually and count rows from 0 to find the right number.
     default: 0
     min: 0
     max: 99
@@ -64,219 +63,304 @@ configs:
 [[End Metadata]]
 --]=====]
 
--- ============================================================
--- READ CONFIG FROM SND UI
--- ============================================================
+-- =========================================================
+-- REQUIRED IMPORT
+-- =========================================================
+import("System.Numerics")
 
-local function ParseItemIdList(str)
-    local ids = {}
-    if not str or str == "" then return ids end
-    for chunk in tostring(str):gmatch("[^,]+") do
-        local trimmed = chunk:match("^%s*(.-)%s*$")
-        local id = tonumber(trimmed)
-        if id then
-            ids[id] = true
+-- =========================================================
+-- PREFIX / ECHO LOG
+-- =========================================================
+PREFIX  = "[DUCKBONE]"
+echoLog = true
+
+local function _echo(s)
+    yield("/echo " .. tostring(s))
+end
+
+local function _log(s)
+    local msg = tostring(s)
+    Dalamud.Log(msg)
+    if echoLog then _echo(msg) end
+end
+
+local function _fmt(msg, ...)
+    return string.format("%s %s", PREFIX, string.format(msg, ...))
+end
+
+function Logf(msg, ...)  _log(_fmt(msg, ...))  end
+function Echof(msg, ...) _echo(_fmt(msg, ...)) end
+
+Log  = Logf
+Echo = Echof
+
+-- =========================================================
+-- SLEEP / TIMING
+-- =========================================================
+TIME = {
+    POLL    = 0.10,
+    TIMEOUT = 10.0,
+    STABLE  = 0.30,
+}
+
+local function _sleep(seconds)
+    local s = tonumber(seconds) or 0
+    if s < 0 then s = 0 end
+    s = math.floor(s * 10 + 0.5) / 10
+    yield("/wait " .. s)
+end
+
+Sleep = _sleep
+
+-- =========================================================
+-- WAIT UNTIL HELPER
+-- =========================================================
+local function WaitUntil(predicateFn, timeoutSec, pollSec, stableSec)
+    timeoutSec = tonumber(timeoutSec) or TIME.TIMEOUT
+    pollSec    = tonumber(pollSec)    or TIME.POLL
+    stableSec  = tonumber(stableSec)  or TIME.STABLE
+
+    local start     = os.clock()
+    local holdStart = nil
+
+    while (os.clock() - start) < timeoutSec do
+        local ok, res = pcall(predicateFn)
+        if ok and res then
+            if not holdStart then holdStart = os.clock() end
+            if (os.clock() - holdStart) >= stableSec then return true end
+        else
+            holdStart = nil
         end
+        _sleep(pollSec)
     end
-    return ids
+    return false
 end
 
-local GC_NAME_MAP = {
-    ["Maelstrom"]              = 1,
-    ["Order of the Twin Adder"] = 2,
-    ["Immortal Flames"]        = 3,
+-- =========================================================
+-- ADDON HELPERS
+-- =========================================================
+local function _get_addon(name)
+    local ok, addon = pcall(Addons.GetAddon, name)
+    if ok and addon ~= nil then return addon end
+    return nil
+end
+
+function IsAddonReady(name)
+    local addon = _get_addon(name)
+    return addon and addon.Ready or false
+end
+
+function IsAddonVisible(name)
+    local addon = _get_addon(name)
+    return addon and addon.Exists or false
+end
+
+local function WaitForAddon(name, timeoutSec)
+    Log("awaiting addon: %s", name)
+    local ok = WaitUntil(function()
+        local addon = _get_addon(name)
+        return addon and addon.Ready
+    end, timeoutSec or TIME.TIMEOUT, TIME.POLL, 0.0)
+    if not ok then Log("WaitForAddon timeout: %s", name) end
+    return ok
+end
+
+local function CloseAddon(name)
+    if IsAddonVisible(name) then
+        yield("/callback " .. name .. " true -1")
+        Sleep(TIME.STABLE)
+    end
+end
+
+-- =========================================================
+-- CHARACTER / ZONE / CONDITIONS
+-- =========================================================
+local CharacterCondition = {
+    casting             = 27,
+    betweenAreas        = 45,
+    betweenAreasForDuty = 51,
+    boundByDuty34       = 34,
+    boundByDuty56       = 56,
 }
 
-local runs_per_cycle    = tonumber(Config.Get("Runs Per Cycle"))   or 5
-local gc_choice         = tostring(Config.Get("Grand Company")     or "Maelstrom")
-local list_mode         = tostring(Config.Get("List Mode")         or "Blacklist"):lower()
-local item_id_str       = tostring(Config.Get("Protected Item IDs") or "")
-local seal_cap          = tonumber(Config.Get("Seal Cap"))         or 90000
-local seal_reserve      = tonumber(Config.Get("Seal Reserve"))     or 1500
-local shop_row          = tonumber(Config.Get("Duckbone Shop Row")) or 0
-
-local gc_index          = GC_NAME_MAP[gc_choice] or 1
-local ITEM_LIST         = ParseItemIdList(item_id_str)
-
--- ============================================================
--- STATIC CONFIG (things that don't need a UI toggle)
--- ============================================================
-local CONFIG = {
-    autoduty_content_id  = 1017,     -- Mistwake patch 7.4
-    duty_timeout         = 1800,     -- 30 min hard timeout per run
-    buy_item_name        = "Duckbone",
-    buy_item_seal_cost   = 200,
-    interact_delay       = 1.5,
-    nav_stop_dist        = 3.0,
-
-    -- GC-specific data indexed by gc_index (1/2/3)
-    gc_tp = {
-        [1] = "Limsa Lominsa Lower Decks",
-        [2] = "New Gridania",
-        [3] = "Ul'dah - Steps of Nald",
-    },
-    gc_zone = {
-        [1] = 129,
-        [2] = 133,
-        [3] = 130,
-    },
-    gc_officer_pos = {
-        [1] = { x = -67.8, y = 21.4, z = -18.1 },
-        [2] = { x = -72.3, y = -1.0, z = -14.1 },
-        [3] = { x = -148.9, y = 4.1,  z = -107.0 },
-    },
-    gc_shop_pos = {
-        [1] = { x = -72.2, y = 21.4, z = -14.9 },
-        [2] = { x = -74.5, y = -1.0, z = -12.0 },
-        [3] = { x = -145.7, y = 4.1,  z = -107.0 },
-    },
-    gc_officer_name = {
-        [1] = "Storm Personnel Officer",
-        [2] = "Serpent Personnel Officer",
-        [3] = "Flame Personnel Officer",
-    },
-    gc_shop_name = {
-        [1] = "Storm Quartermaster",
-        [2] = "Serpent Quartermaster",
-        [3] = "Flame Quartermaster",
-    },
-}
-
--- ============================================================
--- STATE COUNTERS
--- ============================================================
-local total_runs_completed = 0
-local total_cycles         = 0
-local total_seals_earned   = 0
-local total_duckbones      = 0
-local script_start_time    = os.time()
-
--- ============================================================
--- LOGGING
--- ============================================================
-local PREFIX = "[GIL_MISTWAKE]"
-
-local function Log(msg)
-    Dalamud.Log(PREFIX .. " " .. tostring(msg))
+local function GetCharacterCondition(i, bool)
+    if bool == nil then bool = true end
+    return Svc and Svc.Condition and (Svc.Condition[i] == bool) or false
 end
 
-local function Echo(msg)
-    yield("/echo " .. PREFIX .. " " .. tostring(msg))
-end
-
-local function EchoLog(msg)
-    Dalamud.Log(PREFIX .. " " .. tostring(msg))
-    yield("/echo " .. PREFIX .. " " .. tostring(msg))
-end
-
--- ============================================================
--- UTILITY
--- ============================================================
-
-local function Wait(s)
-    yield("/wait " .. tostring(s))
-end
-
-local function WaitFor(addon, timeout)
-    timeout = timeout or 10
-    local t = 0
-    while not IsAddonVisible(addon) and t < timeout do
-        Wait(0.5) ; t = t + 0.5
-    end
-    if not IsAddonVisible(addon) then
-        Log("WARN: " .. addon .. " not visible after " .. timeout .. "s")
-        return false
-    end
-    while not IsAddonReady(addon) and t < timeout + 5 do
-        Wait(0.3) ; t = t + 0.3
-    end
-    return IsAddonReady(addon)
-end
-
-local function CloseAddon(addon)
-    if IsAddonVisible(addon) then
-        yield("/callback " .. addon .. " true -1")
-        Wait(0.8)
-    end
+local function GetZoneId()
+    local cs = Svc and Svc.ClientState
+    return cs and cs.TerritoryType or nil
 end
 
 local function IsInZone(zone_id)
-    return Svc.ClientState.TerritoryType == zone_id
+    return GetZoneId() == zone_id
 end
 
-local function MoveToCoords(x, y, z)
-    Log(string.format("Pathing to %.1f, %.1f, %.1f", x, y, z))
-    PathfindAndMoveTo(x, y, z)
+local function InDuty()
+    return GetCharacterCondition(CharacterCondition.boundByDuty34, true)
+        or GetCharacterCondition(CharacterCondition.boundByDuty56, true)
+end
+
+local function PlayerAvailable()
+    return Player ~= nil and Player.Available == true
+end
+
+-- =========================================================
+-- SAFE CALLBACK
+-- =========================================================
+local function SafeCallback(addon, update, ...)
+    local updateStr = (update == false) and "false" or "true"
+    local call = "/callback " .. addon .. " " .. updateStr
+    for _, v in ipairs({...}) do
+        call = call .. " " .. tostring(v)
+    end
+    Log("callback: %s", call)
+    if IsAddonReady(addon) and IsAddonVisible(addon) then
+        yield(call)
+        return true
+    end
+    Log("SafeCallback: addon not ready/visible: %s", addon)
+    return false
+end
+
+-- =========================================================
+-- NAVIGATION (vnavmesh IPC)
+-- =========================================================
+local function StopVnav()
+    if IPC and IPC.vnavmesh then
+        if IPC.vnavmesh.IsRunning and IPC.vnavmesh.IsRunning() then
+            IPC.vnavmesh.Stop()
+        end
+    end
+end
+
+local function MoveToCoords(x, y, z, stopDist)
+    stopDist = tonumber(stopDist) or 3.0
+    if not (IPC and IPC.vnavmesh and IPC.vnavmesh.PathfindAndMoveTo) then
+        Log("MoveToCoords: vnavmesh IPC missing")
+        return false
+    end
+
+    local dest = Vector3(x, y, z)
+    Log("Pathing to %.1f, %.1f, %.1f", x, y, z)
+    IPC.vnavmesh.PathfindAndMoveTo(dest, false)
+
     local elapsed = 0
-    while (PathfindInProgress() or PathIsRunning()) and elapsed < 60 do
-        if GetDistanceToPoint(x, y, z) <= CONFIG.nav_stop_dist then
-            PathStop() ; break
+    local timeout = 120
+    while elapsed < timeout do
+        _sleep(TIME.POLL)
+        elapsed = elapsed + TIME.POLL
+
+        local me = Entity and Entity.Player
+        if me and me.Position then
+            local dist = Vector3.Distance(me.Position, dest)
+            if dist <= stopDist then
+                StopVnav()
+                Log("Arrived at destination")
+                return true
+            end
         end
-        Wait(0.5) ; elapsed = elapsed + 0.5
+
+        if IPC.vnavmesh.IsRunning and not IPC.vnavmesh.IsRunning() then
+            -- Nav stopped on its own, check if close enough
+            local me2 = Entity and Entity.Player
+            if me2 and me2.Position then
+                if Vector3.Distance(me2.Position, dest) <= stopDist + 2.0 then
+                    Log("Nav stopped near destination")
+                    return true
+                end
+            end
+            Log("Nav stopped but not at destination, retrying")
+            IPC.vnavmesh.PathfindAndMoveTo(dest, false)
+        end
     end
-    PathStop()
-    Wait(1)
+
+    StopVnav()
+    Log("MoveToCoords: timeout")
+    return false
 end
 
+-- =========================================================
+-- TELEPORT (Lifestream IPC)
+-- =========================================================
 local function TeleportTo(tp_name, zone_id)
-    if Svc.ClientState.TerritoryType == zone_id then return true end
-    Log("Teleporting to " .. tp_name)
-    IPC.Lifestream.ExecuteCommand(tp_name)
-    local t = 0
-    while IPC.Lifestream.IsBusy() or Svc.ClientState.TerritoryType ~= zone_id do
-        Wait(1)
-        t = t + 1
-        if t > 30 then
-            Log("ERROR: Teleport to " .. tp_name .. " failed")
-            return false
-        end
+    if IsInZone(zone_id) then return true end
+
+    if not (IPC and IPC.Lifestream and IPC.Lifestream.ExecuteCommand) then
+        Log("TeleportTo: Lifestream IPC missing")
+        return false
     end
-    Wait(2)
+
+    Log("Teleporting to %s", tp_name)
+    IPC.Lifestream.ExecuteCommand(tp_name)
+
+    -- Wait for zoning to start
+    WaitUntil(function()
+        return GetCharacterCondition(CharacterCondition.betweenAreas, true)
+            or GetCharacterCondition(CharacterCondition.betweenAreasForDuty, true)
+            or (IPC.Lifestream.IsBusy and IPC.Lifestream.IsBusy())
+    end, 5.0, TIME.POLL, 0.0)
+
+    -- Wait for zoning to finish
+    local arrived = WaitUntil(function()
+        return IsInZone(zone_id) and PlayerAvailable()
+    end, 60.0, TIME.POLL, 1.0)
+
+    if not arrived then
+        Log("TeleportTo: failed to reach %s", tp_name)
+        return false
+    end
+
+    Sleep(TIME.STABLE)
+    Log("Arrived in zone %d", zone_id)
     return true
 end
 
-local function GetCurrentSeals()
-    local seal_ids = {[1]=20, [2]=21, [3]=22}
-    local seal_id = seal_ids[gc_index] or 20
-    return Inventory.GetItemCount(seal_id) or 0
+-- =========================================================
+-- AUTODUTY IPC
+-- =========================================================
+local function IsAutoDutyRunning()
+    return IPC and IPC.AutoDuty and (not IPC.AutoDuty.IsStopped())
 end
 
-local function FormatTime(secs)
-    return string.format("%02d:%02d:%02d",
-        math.floor(secs/3600),
-        math.floor((secs%3600)/60),
-        secs % 60)
+local function StopAutoDuty()
+    if IPC and IPC.AutoDuty and IPC.AutoDuty.Stop then
+        IPC.AutoDuty.Stop()
+        Sleep(TIME.STABLE)
+    end
 end
 
-local function PrintStats()
-    local elapsed = os.time() - script_start_time
-    EchoLog("════════════════════════════════════")
-    EchoLog(string.format("  Cycles    : %d", total_cycles))
-    EchoLog(string.format("  Runs      : %d", total_runs_completed))
-    EchoLog(string.format("  Seals +   : %d", total_seals_earned))
-    EchoLog(string.format("  Duckbones : %d", total_duckbones))
-    EchoLog(string.format("  Seals now : %d", GetCurrentSeals()))
-    EchoLog(string.format("  Runtime   : %s", FormatTime(elapsed)))
-    EchoLog("════════════════════════════════════")
+local function StartAutoDuty(dungeonId, numRuns)
+    if not (IPC and IPC.AutoDuty and IPC.AutoDuty.Run) then
+        Log("StartAutoDuty: AutoDuty IPC missing")
+        return false
+    end
+    Log("Starting AutoDuty: dungeonId=%d runs=%d", dungeonId, numRuns)
+    IPC.AutoDuty.Run(dungeonId, numRuns, false)
+    Sleep(TIME.STABLE)
+    return true
 end
 
--- ============================================================
--- INVENTORY UTILITIES
--- ============================================================
+-- =========================================================
+-- INVENTORY
+-- =========================================================
+local INVENTORY_BAGS = {0, 1, 2, 3}
 
--- Snapshot using known Mistwake drop IDs.
--- Since we can't enumerate bags directly, we track counts of
--- all items in the protected list plus any we've seen drop.
--- For loot logging we use a broad container scan via Inventory.
+local function GetItemCount(itemId)
+    return tonumber(Inventory.GetItemCount(itemId)) or 0
+end
 
 local function SnapshotInventory()
     local snap = {}
-    -- Scan all 4 inventory pages (container IDs 0-3)
-    for bag = 0, 3 do
+    for _, bag in ipairs(INVENTORY_BAGS) do
         for slot = 0, 34 do
-            local itemId = Inventory.GetSlotItemId(bag, slot)
-            if itemId and itemId ~= 0 then
-                snap[itemId] = (snap[itemId] or 0) + 1
+            local ok, item = pcall(function()
+                return Inventory.GetItemInSlot(bag, slot)
+            end)
+            if ok and item and item.ItemId and item.ItemId ~= 0 then
+                local id = item.ItemId
+                snap[id] = (snap[id] or 0) + (item.Count or 1)
             end
         end
     end
@@ -288,32 +372,117 @@ local function LogNewDrops(before, after)
     for id, count in pairs(after) do
         local gained = count - (before[id] or 0)
         if gained > 0 then
-            local label = ITEM_LIST[id] and ("(protected) ID:"..id) or ("ID:"..id)
-            Dalamud.Log(PREFIX .. " DROP: " .. label .. " x" .. gained)
+            Log("  DROP: ItemID %d x%d", id, gained)
             any = true
         end
     end
-    if not any then Dalamud.Log(PREFIX .. " No new items this run.") end
+    if not any then Log("  No new items this run.") end
 end
 
+-- =========================================================
+-- READ CONFIG FROM SND UI
+-- =========================================================
+local function ParseItemIdList(str)
+    local ids = {}
+    if not str or str == "" then return ids end
+    for chunk in tostring(str):gmatch("[^,]+") do
+        local trimmed = chunk:match("^%s*(.-)%s*$")
+        local id = tonumber(trimmed)
+        if id then ids[id] = true end
+    end
+    return ids
+end
+
+local GC_NAME_TO_INDEX = {
+    ["Maelstrom"]               = 1,
+    ["Order of the Twin Adder"] = 2,
+    ["Immortal Flames"]         = 3,
+}
+
+local GC_SEAL_CURRENCY = {[1]=20, [2]=21, [3]=22}
+
+local GC_TP_NAME = {
+    [1] = "Limsa Lominsa Lower Decks",
+    [2] = "New Gridania",
+    [3] = "Ul'dah - Steps of Nald",
+}
+
+local GC_ZONE_ID = {
+    [1] = 129,
+    [2] = 133,
+    [3] = 130,
+}
+
+local GC_OFFICER_POS = {
+    [1] = {x = -67.8, y = 21.4, z = -18.1},
+    [2] = {x = -72.3, y = -1.0, z = -14.1},
+    [3] = {x = -148.9, y = 4.1,  z = -107.0},
+}
+
+local GC_SHOP_POS = {
+    [1] = {x = -72.2, y = 21.4, z = -14.9},
+    [2] = {x = -74.5, y = -1.0, z = -12.0},
+    [3] = {x = -145.7, y = 4.1,  z = -107.0},
+}
+
+local GC_OFFICER_NAME = {
+    [1] = "Storm Personnel Officer",
+    [2] = "Serpent Personnel Officer",
+    [3] = "Flame Personnel Officer",
+}
+
+local GC_SHOP_NAME = {
+    [1] = "Storm Quartermaster",
+    [2] = "Serpent Quartermaster",
+    [3] = "Flame Quartermaster",
+}
+
+-- Mistwake content ID (verified from Mathematics Farm script)
+local MISTWAKE_ID = 1314
+
+-- Read config values
+local cfg_runs       = tonumber(Config.Get("Runs Per Cycle"))      or 5
+local cfg_gc_name    = tostring(Config.Get("Grand Company")        or "Maelstrom")
+local cfg_list_mode  = tostring(Config.Get("List Mode")            or "Off"):lower()
+local cfg_item_ids   = tostring(Config.Get("Protected Item IDs")   or "")
+local cfg_seal_cap   = tonumber(Config.Get("Seal Cap"))            or 90000
+local cfg_seal_res   = tonumber(Config.Get("Seal Reserve"))        or 1500
+local cfg_shop_row   = tonumber(Config.Get("Duckbone Shop Row"))   or 0
+
+local gc_index  = GC_NAME_TO_INDEX[cfg_gc_name] or 1
+local ITEM_LIST = ParseItemIdList(cfg_item_ids)
+
+-- =========================================================
+-- SEALS
+-- =========================================================
+local function GetCurrentSeals()
+    local seal_id = GC_SEAL_CURRENCY[gc_index] or 20
+    return tonumber(Inventory.GetItemCount(seal_id)) or 0
+end
+
+-- =========================================================
+-- ITEM FILTER
+-- =========================================================
 local function ShouldTurnIn(item_id)
-    if list_mode == "off" then return true end
+    if cfg_list_mode == "off" then return true end
     local in_list = ITEM_LIST[item_id] == true
-    if list_mode == "whitelist" then return in_list end
-    if list_mode == "blacklist" then return not in_list end
+    if cfg_list_mode == "whitelist" then return in_list end
+    if cfg_list_mode == "blacklist" then return not in_list end
     return true
 end
 
 local function GetDeliverableItems()
     local out = {}
-    for bag = 0, 3 do
+    for _, bag in ipairs(INVENTORY_BAGS) do
         for slot = 0, 34 do
-            local itemId = Inventory.GetSlotItemId(bag, slot)
-            if itemId and itemId ~= 0 then
-                if ShouldTurnIn(itemId) then
+            local ok, item = pcall(function()
+                return Inventory.GetItemInSlot(bag, slot)
+            end)
+            if ok and item and item.ItemId and item.ItemId ~= 0 then
+                if ShouldTurnIn(item.ItemId) then
                     table.insert(out, {
-                        id    = itemId,
-                        label = "ID:" .. itemId,
+                        id    = item.ItemId,
+                        label = "ID:" .. item.ItemId,
                     })
                 end
             end
@@ -322,142 +491,216 @@ local function GetDeliverableItems()
     return out
 end
 
--- ============================================================
--- PHASE 1 — AUTODUTY DUNGEON RUNS
--- ============================================================
+-- =========================================================
+-- STATS
+-- =========================================================
+local total_runs_completed = 0
+local total_cycles         = 0
+local total_seals_earned   = 0
+local total_duckbones      = 0
+local script_start_time    = os.time()
 
-local function WaitForDutyComplete(timeout)
-    Log("Waiting for duty to finish (max " .. timeout .. "s)...")
-    local elapsed = 0
-    Wait(15)
-    while elapsed < timeout do
-        if not Svc.Condition[34] then
-            Log("Duty complete")
+local function FormatTime(secs)
+    return string.format("%02d:%02d:%02d",
+        math.floor(secs / 3600),
+        math.floor((secs % 3600) / 60),
+        secs % 60)
+end
+
+local function PrintStats()
+    local elapsed = os.time() - script_start_time
+    Log("════════════════════════════════════")
+    Log("  Cycles    : %d", total_cycles)
+    Log("  Runs      : %d", total_runs_completed)
+    Log("  Seals +   : %d", total_seals_earned)
+    Log("  Duckbones : %d", total_duckbones)
+    Log("  Seals now : %d", GetCurrentSeals())
+    Log("  Runtime   : %s", FormatTime(os.time() - script_start_time))
+    Log("════════════════════════════════════")
+end
+
+-- =========================================================
+-- INTERACT BY NAME HELPER
+-- =========================================================
+local function InteractWithNPC(name, timeout)
+    timeout = tonumber(timeout) or 5.0
+    local e = Entity and Entity.GetEntityByName and Entity.GetEntityByName(name)
+    if not e then
+        Log("InteractWithNPC: entity not found '%s'", name)
+        return false
+    end
+
+    local start = os.clock()
+    while (os.clock() - start) < timeout do
+        e:SetAsTarget()
+        _sleep(TIME.POLL)
+        local tgt = Entity and Entity.Target
+        if tgt and tgt.Name == name then
+            e:Interact()
+            Sleep(TIME.STABLE)
             return true
         end
-        Wait(5) ; elapsed = elapsed + 5
+        _sleep(TIME.POLL)
+    end
+    Log("InteractWithNPC: timeout '%s'", name)
+    return false
+end
+
+-- =========================================================
+-- PHASE 1 — AUTODUTY DUNGEON RUNS
+-- =========================================================
+local function WaitForDutyComplete(timeout)
+    Log("Waiting for duty to finish (max %ds)...", timeout)
+    -- Give AutoDuty a moment to actually enter the duty
+    Sleep(15)
+
+    local elapsed = 0
+    while elapsed < timeout do
+        if not InDuty() then
+            Log("Duty complete flag cleared")
+            return true
+        end
+        _sleep(5)
+        elapsed = elapsed + 5
         if elapsed % 60 == 0 then
-            Log(string.format("  In duty... %ds elapsed", elapsed))
+            Log("Still in duty... %ds elapsed", elapsed)
         end
     end
-    Log("ERROR: Duty timeout")
+    Log("ERROR: Duty timeout after %ds", timeout)
     return false
 end
 
 local function RunDungeonCycle(num_runs)
-    EchoLog(string.format("=== DUNGEON PHASE: %d Mistwake runs ===", num_runs))
+    Log("=== DUNGEON PHASE: %d Mistwake runs ===", num_runs)
 
     for run = 1, num_runs do
-        EchoLog(string.format("-- Run %d/%d (total %d) --",
-            run, num_runs, total_runs_completed + 1))
+        Log("-- Run %d/%d (total so far: %d) --", run, num_runs, total_runs_completed + 1)
 
-        if Svc.Condition[34] then
-            Log("Already in duty at start — waiting to clear...")
+        -- If somehow already in duty, wait for it to clear
+        if InDuty() then
+            Log("Already in duty at run start, waiting to clear...")
             local t = 0
-            while Svc.Condition[34] and t < 600 do
-                Wait(5) ; t = t + 5
+            while InDuty() and t < 600 do
+                _sleep(5) ; t = t + 5
             end
         end
 
+        -- Snapshot inventory before run for loot logging
         local snap_before = SnapshotInventory()
 
-        Log("Queueing Mistwake via AutoDuty (ID " .. CONFIG.autoduty_content_id .. ")")
-        yield("/autoduty start " .. CONFIG.autoduty_content_id)
-        Wait(5)
-
-        -- Wait for duty to load
-        local qt = 0
-        while not Svc.Condition[34] and qt < 300 do
-            Wait(5) ; qt = qt + 5
-        end
-        if not Svc.Condition[34] then
-            Log("ERROR: Never entered duty — skipping run")
+        -- Start AutoDuty
+        if not StartAutoDuty(MISTWAKE_ID, 1) then
+            Log("ERROR: Could not start AutoDuty — skipping run")
             goto next_run
         end
 
-        local ok = WaitForDutyComplete(CONFIG.duty_timeout)
-        if not ok then
-            Log("Duty timed out — leaving")
-            yield("/dutyleave")
-            Wait(10)
+        -- Wait for duty to actually start (condition 34)
+        local entered = WaitUntil(function()
+            return InDuty()
+        end, 120.0, 1.0, 0.0)
+
+        if not entered then
+            Log("ERROR: Never entered duty after 120s — skipping run")
+            StopAutoDuty()
+            goto next_run
         end
 
+        -- Wait for run to finish
+        local finished = WaitForDutyComplete(1800)
+        if not finished then
+            Log("Duty timed out — stopping AutoDuty and leaving")
+            StopAutoDuty()
+            yield("/dutyleave")
+            Sleep(15)
+        end
+
+        -- Log what dropped
         Log("--- Loot this run ---")
         LogNewDrops(snap_before, SnapshotInventory())
 
         total_runs_completed = total_runs_completed + 1
-        EchoLog(string.format("Run %d done | Total: %d | Seals: %d",
-            run, total_runs_completed, GetCurrentSeals()))
-        Wait(5)
+        Log("Run %d complete | Total: %d | Seals: %d",
+            run, total_runs_completed, GetCurrentSeals())
 
+        Sleep(5)
         ::next_run::
     end
 
-    EchoLog("=== Dungeon phase complete ===")
+    Log("=== Dungeon phase done. %d total runs ===", total_runs_completed)
 end
 
--- ============================================================
+-- =========================================================
 -- PHASE 2 — EXPERT DELIVERY
--- ============================================================
-
+-- =========================================================
 local function DoExpertDelivery()
-    EchoLog("=== EXPERT DELIVERY PHASE ===")
-
-    local mode_display = list_mode:upper()
-    local protected_count = 0
-    for _ in pairs(ITEM_LIST) do protected_count = protected_count + 1 end
-    Log(string.format("Mode: %s | Protected IDs: %d", mode_display, protected_count))
+    Log("=== EXPERT DELIVERY PHASE ===")
+    Log("Mode: %s", cfg_list_mode:upper())
 
     local deliverable = GetDeliverableItems()
     if #deliverable == 0 then
-        EchoLog("No deliverable items — skipping delivery")
+        Log("No deliverable items found — skipping delivery")
         return
     end
 
-    EchoLog(string.format("%d item(s) queued for delivery", #deliverable))
+    Log("%d item(s) queued for delivery:", #deliverable)
     for _, item in ipairs(deliverable) do
-        Log("  → " .. item.label)
+        Log("  -> %s", item.label)
     end
 
-    -- Navigate to officer
-    local pos = CONFIG.gc_officer_pos[gc_index]
-    MoveToCoords(pos.x, pos.y, pos.z)
+    -- Navigate to Personnel Officer
+    local opos = GC_OFFICER_POS[gc_index]
+    MoveToCoords(opos.x, opos.y, opos.z)
 
-    yield("/target " .. CONFIG.gc_officer_name[gc_index])
-    Wait(1)
-    yield("/interact")
-    Wait(CONFIG.interact_delay)
+    -- Interact with officer NPC
+    local officer = GC_OFFICER_NAME[gc_index]
+    if not InteractWithNPC(officer, 8.0) then
+        Log("ERROR: Could not interact with %s", officer)
+        return
+    end
 
-    if not WaitFor("SelectString", 10) then
+    -- Officer opens SelectString menu
+    -- Option 1 (0-based) = Expert Delivery
+    if not WaitForAddon("SelectString", 10) then
         Log("ERROR: Officer menu did not open")
         return
     end
-    yield("/callback SelectString true 1")   -- Expert Delivery
-    Wait(CONFIG.interact_delay)
+    SafeCallback("SelectString", true, 1)
+    Sleep(TIME.STABLE)
 
-    if not WaitFor("GrandCompanySupplyList", 10) then
+    -- Wait for Expert Delivery window
+    if not WaitForAddon("GrandCompanySupplyList", 10) then
         Log("ERROR: Expert Delivery window did not open")
         CloseAddon("SelectString")
         return
     end
 
-    EchoLog("Delivering items...")
+    Log("Expert Delivery window open, processing items...")
 
     local items_turned_in = 0
     local items_skipped   = 0
     local seal_before     = GetCurrentSeals()
     local current_row     = 0
-    local total_rows      = #deliverable
     local attempt         = 0
+    local max_attempts    = 60
 
-    while attempt < 60 do
+    -- Refresh deliverable list
+    deliverable = GetDeliverableItems()
+    local total_rows = #deliverable
+
+    while attempt < max_attempts do
         attempt = attempt + 1
 
-        if not IsAddonVisible("GrandCompanySupplyList") then break end
-        if GetCurrentSeals() >= seal_cap - 100 then
-            EchoLog("Seal cap reached — stopping delivery")
+        if not IsAddonVisible("GrandCompanySupplyList") then
+            Log("Delivery window closed")
             break
         end
+
+        -- Check seal cap
+        if GetCurrentSeals() >= cfg_seal_cap - 100 then
+            Log("Seal cap reached (%d) — stopping delivery", GetCurrentSeals())
+            break
+        end
+
         if current_row >= total_rows then
             Log("End of item list")
             break
@@ -467,170 +710,230 @@ local function DoExpertDelivery()
         if not item then break end
 
         if not ShouldTurnIn(item.id) then
-            Log("Skipping " .. item.label)
+            Log("Skipping row %d: %s", current_row, item.label)
             current_row = current_row + 1
             items_skipped = items_skipped + 1
         else
-            yield("/callback GrandCompanySupplyList true 0 " .. current_row)
-            Wait(CONFIG.interact_delay)
+            -- Click item row in delivery window
+            SafeCallback("GrandCompanySupplyList", true, 0, current_row)
+            Sleep(TIME.STABLE)
 
             if IsAddonVisible("SelectYesno") then
-                yield("/callback SelectYesno true 0")
-                Wait(CONFIG.interact_delay)
+                SafeCallback("SelectYesno", true, 0)
+                Sleep(TIME.STABLE)
                 items_turned_in = items_turned_in + 1
-                Log(string.format("Delivered %s | Seals: %d", item.label, GetCurrentSeals()))
+                Log("Delivered %s | Seals: %d", item.label, GetCurrentSeals())
+
                 -- Rescan after delivery since list shifts
                 deliverable = GetDeliverableItems()
                 current_row = items_skipped
                 total_rows  = #deliverable + items_skipped
             else
-                Log("WARN: No confirm dialog for row " .. current_row .. " — advancing")
+                Log("WARN: No confirm dialog for row %d — advancing", current_row)
                 current_row = current_row + 1
             end
         end
     end
 
     CloseAddon("GrandCompanySupplyList")
-    Wait(1)
+    Sleep(TIME.STABLE)
     CloseAddon("SelectString")
-    Wait(0.5)
+    Sleep(TIME.POLL)
 
     local gained = GetCurrentSeals() - seal_before
     total_seals_earned = total_seals_earned + math.max(0, gained)
 
-    EchoLog(string.format("Delivery done: %d in | %d skipped | +%d seals | Now: %d",
-        items_turned_in, items_skipped, gained, GetCurrentSeals()))
+    Log("Delivery complete: %d turned in | %d skipped | +%d seals | Now: %d",
+        items_turned_in, items_skipped, gained, GetCurrentSeals())
 end
 
--- ============================================================
+-- =========================================================
 -- PHASE 3 — BUY DUCKBONES
--- ============================================================
-
+-- =========================================================
 local function BuyDuckbones()
-    EchoLog("=== BUY DUCKBONES PHASE ===")
+    Log("=== BUY DUCKBONES PHASE ===")
 
-    if GetCurrentSeals() <= seal_reserve then
-        EchoLog(string.format("Seals too low (%d) — skipping purchase", GetCurrentSeals()))
+    local cur_seals = GetCurrentSeals()
+    if cur_seals <= cfg_seal_res then
+        Log("Seals too low (%d <= reserve %d) — skipping purchase", cur_seals, cfg_seal_res)
         return
     end
 
-    local pos = CONFIG.gc_shop_pos[gc_index]
-    MoveToCoords(pos.x, pos.y, pos.z)
+    -- Navigate to Quartermaster
+    local spos = GC_SHOP_POS[gc_index]
+    MoveToCoords(spos.x, spos.y, spos.z)
 
-    yield("/target " .. CONFIG.gc_shop_name[gc_index])
-    Wait(1)
-    yield("/interact")
-    Wait(CONFIG.interact_delay)
-
-    if WaitFor("SelectString", 8) then
-        yield("/callback SelectString true 0")   -- "Purchase Items"
-        Wait(CONFIG.interact_delay)
+    local shopnpc = GC_SHOP_NAME[gc_index]
+    if not InteractWithNPC(shopnpc, 8.0) then
+        Log("ERROR: Could not interact with %s", shopnpc)
+        return
     end
 
-    if not WaitFor("GCShop", 10) then
+    -- Quartermaster opens SelectString — "Purchase Items" is option 0
+    if IsAddonVisible("SelectString") then
+        if WaitForAddon("SelectString", 8) then
+            SafeCallback("SelectString", true, 0)
+            Sleep(TIME.STABLE)
+        end
+    end
+
+    if not WaitForAddon("GCShop", 10) then
         Log("ERROR: GC Shop did not open")
         CloseAddon("SelectString")
         return
     end
 
-    EchoLog("GC Shop open — buying Duckbones...")
-    yield("/callback GCShop true 0")
-    Wait(1)
+    Log("GC Shop open — buying Duckbones (shop row %d)...", cfg_shop_row)
 
-    local bought = 0
+    -- Make sure we're on the right tab
+    SafeCallback("GCShop", true, 0)
+    Sleep(TIME.STABLE)
 
-    while true do
-        local cur = GetCurrentSeals()
-        if cur - CONFIG.buy_item_seal_cost < seal_reserve then
-            Log("Not enough seals for another purchase — done")
+    local bought       = 0
+    local DUCKBONE_COST = 200
+    local max_loops    = 200
+
+    for _ = 1, max_loops do
+        cur_seals = GetCurrentSeals()
+
+        if cur_seals - DUCKBONE_COST < cfg_seal_res then
+            Log("Not enough seals for another purchase (%d) — done", cur_seals)
             break
         end
 
-        yield("/callback GCShop true 0 " .. shop_row)
-        Wait(CONFIG.interact_delay)
+        -- Click the item row
+        SafeCallback("GCShop", true, 0, cfg_shop_row)
+        Sleep(TIME.STABLE)
 
         if IsAddonVisible("ShopExchangeDialog") then
-            local max_qty = math.floor((cur - seal_reserve) / CONFIG.buy_item_seal_cost)
+            -- Calculate max we can buy in one go
+            local max_qty = math.floor((cur_seals - cfg_seal_res) / DUCKBONE_COST)
             max_qty = math.max(1, math.min(max_qty, 99))
-            yield("/callback ShopExchangeDialog true 0 " .. max_qty .. " 0")
-            Wait(CONFIG.interact_delay)
+            SafeCallback("ShopExchangeDialog", true, 0, max_qty, 0)
+            Sleep(TIME.STABLE)
             bought = bought + max_qty
-            EchoLog(string.format("Bought %d Duckbones | Seals left: %d",
-                max_qty, GetCurrentSeals()))
-            if GetCurrentSeals() - CONFIG.buy_item_seal_cost < seal_reserve then break end
+            Log("Bought %d Duckbones | Seals remaining: %d", max_qty, GetCurrentSeals())
+
         elseif IsAddonVisible("SelectYesno") then
-            yield("/callback SelectYesno true 0")
-            Wait(CONFIG.interact_delay)
+            SafeCallback("SelectYesno", true, 0)
+            Sleep(TIME.STABLE)
             bought = bought + 1
+            Log("Bought 1 Duckbone | Seals remaining: %d", GetCurrentSeals())
+
         elseif IsAddonVisible("GCShop") then
-            Log("WARN: No buy dialog — check Duckbone Shop Row in config")
+            Log("WARN: No buy dialog appeared — check Duckbone Shop Row in config (currently %d)", cfg_shop_row)
             break
+
         else
-            Log("WARN: Shop closed unexpectedly")
+            Log("WARN: GCShop closed unexpectedly")
+            break
+        end
+
+        -- If seals dropped below threshold after purchase, stop
+        if GetCurrentSeals() - DUCKBONE_COST < cfg_seal_res then
             break
         end
     end
 
     CloseAddon("GCShop")
-    Wait(0.5)
+    Sleep(TIME.POLL)
     CloseAddon("SelectString")
 
     total_duckbones = total_duckbones + bought
-    EchoLog(string.format("Bought %d Duckbones this cycle | Total: %d | Seals: %d",
-        bought, total_duckbones, GetCurrentSeals()))
+    Log("Bought %d Duckbones this cycle | Total ever: %d | Seals: %d",
+        bought, total_duckbones, GetCurrentSeals())
 end
 
--- ============================================================
--- STARTUP
--- ============================================================
+-- =========================================================
+-- STOP HANDLER
+-- =========================================================
+function OnStop()
+    StopVnav()
+    StopAutoDuty()
+    Log("Script stopped by user")
+end
 
-EchoLog("╔══════════════════════════════════════╗")
-EchoLog("║   Mistwake Gil Farming Script v1.2   ║")
-EchoLog("╚══════════════════════════════════════╝")
-EchoLog(string.format("Runs/cycle: %d | GC: %s | Mode: %s | Seal cap: %d",
-    runs_per_cycle, gc_choice, list_mode:upper(), seal_cap))
+-- =========================================================
+-- STARTUP BANNER
+-- =========================================================
+Log("╔══════════════════════════════════════════╗")
+Log("║   Mistwake Duckbone Farm  v2.0.0         ║")
+Log("╚══════════════════════════════════════════╝")
+Log("Runs/cycle : %d", cfg_runs)
+Log("GC         : %s (index %d)", cfg_gc_name, gc_index)
+Log("List mode  : %s", cfg_list_mode:upper())
+Log("Seal cap   : %d | Reserve: %d", cfg_seal_cap, cfg_seal_res)
+Log("Shop row   : %d", cfg_shop_row)
+Log("Dungeon ID : %d (Mistwake)", MISTWAKE_ID)
 
-if item_id_str ~= "" then
+if cfg_item_ids ~= "" then
     local ids = {}
     for id in pairs(ITEM_LIST) do table.insert(ids, tostring(id)) end
-    EchoLog("Protected IDs: " .. table.concat(ids, ", "))
+    Log("Item list  : %s", table.concat(ids, ", "))
 else
-    EchoLog("No item IDs configured.")
+    if cfg_list_mode ~= "off" then
+        Log("WARN: List mode is %s but Protected Item IDs is empty!", cfg_list_mode:upper())
+    end
 end
 
--- ============================================================
--- MAIN LOOP
--- ============================================================
+-- Verify IPC availability
+if not (IPC and IPC.AutoDuty) then
+    Log("FATAL: AutoDuty IPC not available — is AutoDuty installed and enabled?")
+    return
+end
+if not (IPC and IPC.vnavmesh) then
+    Log("FATAL: vnavmesh IPC not available — is vnavmesh installed and enabled?")
+    return
+end
+if not (IPC and IPC.Lifestream) then
+    Log("FATAL: Lifestream IPC not available — is Lifestream installed and enabled?")
+    return
+end
 
+Log("All plugins verified. Starting loop...")
+Sleep(2)
+
+-- =========================================================
+-- MAIN LOOP
+-- =========================================================
 while true do
     total_cycles = total_cycles + 1
-    EchoLog(string.format("════ CYCLE %d START ════", total_cycles))
+    Log("════ CYCLE %d START ════", total_cycles)
 
-    local run_ok, run_err = pcall(RunDungeonCycle, runs_per_cycle)
+    -- Phase 1: Dungeon runs
+    local run_ok, run_err = pcall(RunDungeonCycle, cfg_runs)
     if not run_ok then
-        Log("ERROR in dungeon phase: " .. tostring(run_err))
-        if Svc.Condition[34] then
-            yield("/dutyleave") ; Wait(15)
+        Log("ERROR in dungeon phase: %s", tostring(run_err))
+        if InDuty() then
+            StopAutoDuty()
+            yield("/dutyleave")
+            Sleep(15)
         end
     end
 
-    local gc_zone = CONFIG.gc_zone[gc_index]
-    local gc_tp   = CONFIG.gc_tp[gc_index]
-    local tp_ok   = TeleportTo(gc_tp, gc_zone)
+    -- Teleport to GC city
+    local gc_zone = GC_ZONE_ID[gc_index]
+    local gc_tp   = GC_TP_NAME[gc_index]
 
-    if tp_ok then
-        Wait(3)
+    if TeleportTo(gc_tp, gc_zone) then
+        Sleep(3)
 
+        -- Phase 2: Expert delivery
         local del_ok, del_err = pcall(DoExpertDelivery)
-        if not del_ok then Log("ERROR in delivery: " .. tostring(del_err)) end
+        if not del_ok then
+            Log("ERROR in delivery phase: %s", tostring(del_err))
+        end
 
+        -- Phase 3: Buy duckbones
         local buy_ok, buy_err = pcall(BuyDuckbones)
-        if not buy_ok then Log("ERROR in buy phase: " .. tostring(buy_err)) end
+        if not buy_ok then
+            Log("ERROR in buy phase: %s", tostring(buy_err))
+        end
     else
-        Log("ERROR: Could not reach GC — skipping to next cycle")
+        Log("ERROR: Could not reach GC (%s) — skipping sell/buy this cycle", gc_tp)
     end
 
     PrintStats()
-    EchoLog(string.format("════ CYCLE %d END ════", total_cycles))
-    Wait(5)
+    Log("════ CYCLE %d END ════", total_cycles)
+    Sleep(5)
 end
