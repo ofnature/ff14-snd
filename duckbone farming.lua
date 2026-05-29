@@ -850,7 +850,7 @@ end
 function OnStop()
     StopVnav()
     StopAutoDuty()
-    Log("Script stopped by user")
+    yield("/echo " .. PREFIX .. " Script stopped by user")
 end
 
 -- =========================================================
